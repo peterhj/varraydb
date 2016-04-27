@@ -161,10 +161,28 @@ impl VarrayDb {
       buf_file:     buf_file,
       index_path:   index_path,
       index_file:   index_file,
-      read_only:    false,
+      read_only:    true,
       buf_chunks:       buf_chunks,
       index_entries:    index_entries,
     })
+  }
+
+  pub fn len(&self) -> usize {
+    self.index_entries.len()
+  }
+
+  pub fn prefetch(&mut self) {
+    let length = self.len();
+    self.prefetch_range(0, length);
+  }
+
+  pub fn prefetch_range(&mut self, start_idx: usize, end_idx: usize) {
+    let mut buf = vec![];
+    for idx in start_idx .. end_idx {
+      let value = self.get(idx);
+      buf.clear();
+      buf.extend_from_slice(value);
+    }
   }
 
   pub fn get(&mut self, idx: usize) -> &[u8] {
