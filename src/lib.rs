@@ -196,13 +196,8 @@ impl VarrayDb {
     sz
   }
 
-  pub fn shuffle(&mut self, out_prefix: &Path, num_partitions: usize) {
+  pub fn external_shuffle(&mut self, out_prefix: &Path, num_partitions: usize) {
     let mut rng = Xorshiftplus128Rng::new(&mut thread_rng());
-
-    // Create an empty output database.
-    println!("DEBUG: shuffle: create output db");
-    // FIXME(20160426): with capacity?
-    let mut out_db = VarrayDb::create(&out_prefix).unwrap();
 
     // Create a total shuffled order.
     println!("DEBUG: shuffle: create total order");
@@ -219,6 +214,12 @@ impl VarrayDb {
       }
     }
 
+    self.external_shuffle_with_order(out_prefix, num_partitions, &shuf_idxs);
+  }
+
+  pub fn external_shuffle_with_order(&mut self, out_prefix: &Path, num_partitions: usize, shuf_idxs: &[usize]) {
+    let length = self.len();
+
     let cache_flush_limit = 64 * 1024 * 1024;
     let mut write_cache_size = 0;
     let mut write_cache = vec![];
@@ -233,9 +234,11 @@ impl VarrayDb {
     let mut part_tmp_dbs = vec![];
     for part in 0 .. num_partitions {
       println!("DEBUG: shuffle: create partition: {}", part);
-      let part_filename = format!(".tmp_shuf_{}.{}", part, out_prefix.file_name().unwrap().to_str().unwrap());
       let mut part_path = PathBuf::from(out_prefix);
-      part_path.set_file_name(part_filename);
+      if num_partitions > 1 {
+        let part_filename = format!(".tmp_shuf_{}.{}", part, out_prefix.file_name().unwrap().to_str().unwrap());
+        part_path.set_file_name(part_filename);
+      }
       part_paths.push(part_path);
 
       let start_i = part * padded_part_len;
@@ -290,6 +293,15 @@ impl VarrayDb {
       part_tmp_db.flush();
       part_tmp_dbs.push(part_tmp_db);
     }
+
+    if num_partitions == 1 {
+      return;
+    }
+
+    // Create an empty output database.
+    println!("DEBUG: shuffle: create output db");
+    // FIXME(20160426): with capacity?
+    let mut out_db = VarrayDb::create(&out_prefix).unwrap();
 
     // Set the merge traversal order.
     println!("DEBUG: shuffle: create merge heap");
