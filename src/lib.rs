@@ -269,8 +269,9 @@ impl VarrayDb {
       let part_len = end_i - start_i;
       for &(_, k) in part_shuf_idxs.iter() {
         assert!(k < part_len);
-        //part_tmp_db.append(self.get(k));
-        let value = self.get(k);
+        let i = start_i + k;
+        //part_tmp_db.append(self.get(i));
+        let value = self.get(i);
         buf.clear();
         buf.extend_from_slice(value);
         write_cache_size += buf.len();
