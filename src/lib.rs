@@ -2,11 +2,18 @@
 
 extern crate byteorder;
 extern crate memmap;
+extern crate rng;
+
+extern crate rand;
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, BigEndian};
 use memmap::{Mmap, Protection};
+use rng::xorshift::{Xorshiftplus128Rng};
 
-use std::fs::{File, OpenOptions};
+use rand::{Rng, thread_rng};
+use std::cmp::{min};
+use std::collections::{BinaryHeap};
+use std::fs::{File, OpenOptions, remove_file};
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
 use std::mem::{size_of};
 use std::path::{Path, PathBuf};
@@ -176,12 +183,189 @@ impl VarrayDb {
     self.prefetch_range(0, length);
   }
 
-  pub fn prefetch_range(&mut self, start_idx: usize, end_idx: usize) {
+  pub fn prefetch_range(&mut self, start_idx: usize, end_idx: usize) -> usize {
+    let mut sz = 0;
     let mut buf = vec![];
     for idx in start_idx .. end_idx {
       let value = self.get(idx);
       buf.clear();
       buf.extend_from_slice(value);
+      sz += buf.len();
+    }
+    assert!(sz >= 0);
+    sz
+  }
+
+  pub fn shuffle(&mut self, out_prefix: &Path, num_partitions: usize) {
+    let mut rng = Xorshiftplus128Rng::new(&mut thread_rng());
+
+    // Create an empty output database.
+    println!("DEBUG: shuffle: create output db");
+    // FIXME(20160426): with capacity?
+    let mut out_db = VarrayDb::create(&out_prefix).unwrap();
+
+    // Create a total shuffled order.
+    println!("DEBUG: shuffle: create total order");
+    let length = self.len();
+    let mut shuf_idxs: Vec<_> = (0 .. length).collect();
+    rng.shuffle(&mut shuf_idxs);
+    {
+      let mut idxs_path = PathBuf::from(out_prefix);
+      let idxs_filename = format!(".tmp_shuf_idxs.{}", out_prefix.file_name().unwrap().to_str().unwrap());
+      idxs_path.set_file_name(idxs_filename);
+      let mut idxs_file = File::create(&idxs_path).unwrap();
+      for &idx in shuf_idxs.iter() {
+        writeln!(&mut idxs_file, "{}", idx);
+      }
+    }
+
+    let cache_flush_limit = 64 * 1024 * 1024;
+    let mut write_cache_size = 0;
+    let mut write_cache = vec![];
+    let mut buf = vec![];
+
+    // Create and shuffle a set of temporary partition databases.
+    println!("DEBUG: shuffle: create partitions");
+    let padded_part_len = (length + num_partitions - 1) / num_partitions;
+    let mut part_paths = vec![];
+    let mut part_bounds = vec![];
+    let mut part_idx_ptrs_list = vec![];
+    let mut part_tmp_dbs = vec![];
+    for part in 0 .. num_partitions {
+      println!("DEBUG: shuffle: create partition: {}", part);
+      let part_filename = format!(".tmp_shuf_{}.{}", part, out_prefix.file_name().unwrap().to_str().unwrap());
+      let mut part_path = PathBuf::from(out_prefix);
+      part_path.set_file_name(part_filename);
+      part_paths.push(part_path);
+
+      let start_i = part * padded_part_len;
+      let end_i = min(length, (part+1) * padded_part_len);
+      part_bounds.push((start_i, end_i));
+
+      // Order the elements in the current partition by their indices in the
+      // total shuffled order.
+      let mut part_shuf_idxs: Vec<_> = (&shuf_idxs[start_i .. end_i])
+        .iter()
+        .enumerate()
+        .map(|(k, &idx)| (idx, k))
+        .collect();
+      part_shuf_idxs.sort();
+
+      // Also save the relative position of shuffled indices. Convert the
+      // indices into _negative integers_ because later we use a max-heap.
+      let part_idx_ptrs: Vec<_> = part_shuf_idxs
+        .iter()
+        .enumerate()
+        .map(|(j, &(idx, _))| (-(idx as isize), j))
+        .collect();
+      part_idx_ptrs_list.push(part_idx_ptrs);
+
+      println!("DEBUG: shuffle: prefetch: {}", part);
+      let pref_sz = self.prefetch_range(start_i, end_i);
+      println!("DEBUG: shuffle: prefetched sz: {}", pref_sz);
+
+      println!("DEBUG: shuffle: append: {}", part);
+      let mut part_tmp_db = VarrayDb::create(&part_paths[part]).unwrap();
+      let part_len = end_i - start_i;
+      for &(_, k) in part_shuf_idxs.iter() {
+        assert!(k < part_len);
+        //part_tmp_db.append(self.get(k));
+        let value = self.get(k);
+        buf.clear();
+        buf.extend_from_slice(value);
+        write_cache_size += buf.len();
+        write_cache.push(buf.clone());
+        if write_cache_size >= cache_flush_limit{
+          for buf in write_cache.drain(..) {
+            part_tmp_db.append(&buf);
+          }
+          write_cache_size = 0;
+        }
+      }
+      for buf in write_cache.drain(..) {
+        part_tmp_db.append(&buf);
+      }
+      write_cache_size = 0;
+      part_tmp_db.flush();
+      part_tmp_dbs.push(part_tmp_db);
+    }
+
+    // Set the merge traversal order.
+    println!("DEBUG: shuffle: create merge heap");
+    let mut idx_ptr_heap = BinaryHeap::new();
+    for part in 0 .. num_partitions {
+      for &(neg_idx, j) in part_idx_ptrs_list[part].iter() {
+        idx_ptr_heap.push((neg_idx, part, j));
+      }
+    }
+
+    // Initialize the merging by building initial blocks from the partitions.
+    println!("DEBUG: shuffle: init merge");
+    let num_blocks = num_partitions;
+    let mut part_block_bounds = vec![];
+    let mut part_block_counters = vec![];
+    for part in 0 .. num_partitions {
+      let (start_i, end_i) = part_bounds[part];
+      let part_len = end_i - start_i;
+      let block_len = (part_len + num_blocks - 1) / num_blocks;
+
+      let (block_start_j, block_end_j) = (0, block_len);
+      part_block_bounds.push((block_start_j, block_end_j));
+      part_block_counters.push(0);
+
+      part_tmp_dbs[part].prefetch_range(block_start_j, block_end_j);
+    }
+
+    // Merge the temporary partition databases and flush the results to the
+    // output database.
+    println!("DEBUG: shuffle: begin merge");
+    while !idx_ptr_heap.is_empty() {
+      let (_, part, j) = idx_ptr_heap.pop().unwrap();
+      assert_eq!(j, part_block_counters[part]);
+
+      let (pre_block_start_j, pre_block_end_j) = part_block_bounds[part];
+      if j >= pre_block_end_j {
+        let (start_i, end_i) = part_bounds[part];
+        let part_len = end_i - start_i;
+        let block_len = (part_len + num_blocks - 1) / num_blocks;
+
+        let post_block_start_j = pre_block_end_j;
+        let post_block_end_j = min(part_len, pre_block_end_j + block_len);
+        part_block_bounds[part] = (post_block_start_j, post_block_end_j);
+
+        part_tmp_dbs[part].prefetch_range(post_block_start_j, post_block_end_j);
+      }
+
+      let (block_start_j, block_end_j) = part_block_bounds[part];
+      assert!(j >= block_start_j);
+      assert!(j < block_end_j);
+
+      let value = part_tmp_dbs[part].get(j);
+      buf.clear();
+      buf.extend_from_slice(value);
+      write_cache_size += buf.len();
+      write_cache.push(buf.clone());
+
+      if write_cache_size >= cache_flush_limit {
+        for buf in write_cache.drain(..) {
+          out_db.append(&buf);
+        }
+        write_cache_size = 0;
+      }
+
+      part_block_counters[part] += 1;
+    }
+    for buf in write_cache.drain(..) {
+      out_db.append(&buf);
+    }
+    write_cache_size = 0;
+    out_db.flush();
+
+    // Remove the temporary partition databases.
+    println!("DEBUG: shuffle: done merge");
+    part_tmp_dbs.clear();
+    for part in 0 .. num_partitions {
+      remove_file(&part_paths[part]).unwrap();
     }
   }
 
@@ -274,5 +458,12 @@ impl VarrayDb {
     self.index_file.write_u64::<LittleEndian>(curr_chunk_idx as u64).unwrap();
     self.index_file.write_u64::<LittleEndian>(curr_offset as u64).unwrap();
     self.index_file.write_u64::<LittleEndian>(value.len() as u64).unwrap();
+  }
+
+  pub fn flush(&mut self) {
+    if !self.buf_chunks.is_empty() {
+      let last_chunk_idx = self.buf_chunks.len()-1;
+      self.buf_chunks[last_chunk_idx].data.flush().unwrap();
+    }
   }
 }

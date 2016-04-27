@@ -7,6 +7,14 @@ authors = ["Peter Jin <peterhaijin@gmail.com>"]
 name = "varraydb"
 path = "src/lib.rs"
 
+[[bin]]
+name = "varraydb-shuffle"
+path = "tools/varraydb-shuffle.rs"
+
 [dependencies]
+rand = "*"
+
 byteorder = "*"
 memmap = "*"
+
+rng = { path = "../../librng" }
