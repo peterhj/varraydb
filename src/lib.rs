@@ -1,5 +1,3 @@
-#![feature(slice_bytes)]
-
 extern crate byteorder;
 extern crate memmap;
 extern crate rng;
@@ -17,7 +15,6 @@ use std::fs::{File, OpenOptions, remove_file};
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
 use std::mem::{size_of};
 use std::path::{Path, PathBuf};
-use std::slice::bytes::{copy_memory};
 
 const BIG_MAGIC:    u64   = 0x5641_5252_4159_4442;
 const VERSION:      u64   = 0x01;
@@ -103,7 +100,7 @@ impl VarrayDb {
       .read(true).write(false).create(false).truncate(false)
       .open(&buf_path)
     {
-      Err(e) => panic!("failed to create buffer file: {:?}", e),
+      Err(e) => panic!("failed to open buffer file: {:?}", e),
       Ok(file) => file,
     };
 
@@ -114,7 +111,7 @@ impl VarrayDb {
       .read(true).write(false).create(false).truncate(false)
       .open(&index_path)
     {
-      Err(e) => panic!("failed to create index file: {:?}", e),
+      Err(e) => panic!("failed to open index file: {:?}", e),
       Ok(file) => file,
     };
 
@@ -152,7 +149,7 @@ impl VarrayDb {
     }
 
     let mut index_entries = vec![];
-    for _ in 0 .. entries_count {
+    for i in 0 .. entries_count {
       let chunk_idx = index_file.read_u64::<LittleEndian>().unwrap() as usize;
       let chunk_offset = index_file.read_u64::<LittleEndian>().unwrap() as usize;
       let value_size = index_file.read_u64::<LittleEndian>().unwrap() as usize;
@@ -161,6 +158,11 @@ impl VarrayDb {
         chunk_offset:   chunk_offset,
         value_size:     value_size,
       });
+      if i >= 1 {
+        if index_entries[i-1].chunk_idx == chunk_idx {
+          assert_eq!(index_entries[i-1].chunk_offset + index_entries[i-1].value_size, chunk_offset);
+        }
+      }
     }
 
     Ok(VarrayDb{
@@ -379,12 +381,13 @@ impl VarrayDb {
     part_tmp_dbs.clear();
     for part in 0 .. num_partitions {
       remove_file(&part_paths[part]).unwrap();
+      // FIXME(20160427): remove index files too.
     }
   }
 
   pub fn get(&mut self, idx: usize) -> &[u8] {
     let entry = &self.index_entries[idx];
-    unsafe { &self.buf_chunks[entry.chunk_idx].data.as_slice()[CHUNK_HEADER + entry.chunk_offset .. CHUNK_HEADER + entry.chunk_offset + entry.value_size] }
+    unsafe { &self.buf_chunks[entry.chunk_idx].data.as_slice()[(CHUNK_HEADER + entry.chunk_offset) .. (CHUNK_HEADER + entry.chunk_offset + entry.value_size)] }
   }
 
   pub fn append(&mut self, value: &[u8]) {
@@ -421,11 +424,14 @@ impl VarrayDb {
         chunk_head.write_u64::<LittleEndian>(0).unwrap();
         chunk_head.write_u64::<LittleEndian>(0).unwrap();
       }
+      data.flush();
+
       self.buf_chunks.push(BufChunk{
         data:     data,
         count:    0,
         used_sz:  0,
       });
+
       self.index_file.seek(
           SeekFrom::Start(3 * size_of::<u64>() as u64),
       ).unwrap();
@@ -435,7 +441,7 @@ impl VarrayDb {
     }
 
     let curr_chunk_idx = self.buf_chunks.len() - 1;
-    let curr_entries_count = self.index_entries.len();
+    let pre_entries_count = self.index_entries.len();
 
     let mut curr_chunk = &mut self.buf_chunks[curr_chunk_idx];
     let curr_offset = curr_chunk.used_sz;
@@ -449,24 +455,24 @@ impl VarrayDb {
       chunk_head.write_u64::<LittleEndian>(curr_chunk.used_sz as u64).unwrap();
     }
 
-    copy_memory(
-        value,
-        unsafe { &mut curr_chunk.data.as_mut_slice()[CHUNK_HEADER + curr_offset .. CHUNK_HEADER + curr_offset + value.len()] },
-    );
+    (unsafe { &mut curr_chunk.data.as_mut_slice()[(CHUNK_HEADER + curr_offset) .. (CHUNK_HEADER + curr_offset + value.len())] })
+      .copy_from_slice(value);
 
     self.index_entries.push(IndexEntry{
       chunk_idx:    curr_chunk_idx,
       chunk_offset: curr_offset,
       value_size:   value.len(),
     });
+
     self.index_file.seek(
         SeekFrom::Start(4 * size_of::<u64>() as u64),
     ).unwrap();
     self.index_file.write_u64::<LittleEndian>(
-        (curr_entries_count + 1) as u64,
+        (pre_entries_count + 1) as u64,
     ).unwrap();
+
     self.index_file.seek(
-        SeekFrom::Start(((5 + 3 * curr_entries_count) * size_of::<u64>()) as u64),
+        SeekFrom::Start(((5 + 3 * pre_entries_count) * size_of::<u64>()) as u64),
     ).unwrap();
     self.index_file.write_u64::<LittleEndian>(curr_chunk_idx as u64).unwrap();
     self.index_file.write_u64::<LittleEndian>(curr_offset as u64).unwrap();
