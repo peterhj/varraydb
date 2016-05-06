@@ -265,9 +265,9 @@ impl VarrayDb {
         .collect();
       part_idx_ptrs_list.push(part_idx_ptrs);
 
-      println!("DEBUG: shuffle: prefetch: {}", part);
+      /*println!("DEBUG: shuffle: prefetch: {}", part);
       let pref_sz = self.prefetch_range(start_i, end_i);
-      println!("DEBUG: shuffle: prefetched sz: {}", pref_sz);
+      println!("DEBUG: shuffle: prefetched sz: {}", pref_sz);*/
 
       println!("DEBUG: shuffle: append: {}", part);
       let mut part_tmp_db = VarrayDb::create(&part_paths[part]).unwrap();
@@ -316,7 +316,11 @@ impl VarrayDb {
 
     // Initialize the merging by building initial blocks from the partitions.
     println!("DEBUG: shuffle: init merge");
-    let num_blocks = num_partitions;
+    let mut part_block_counters = vec![];
+    for part in 0 .. num_partitions {
+      part_block_counters.push(0);
+    }
+    /*let num_blocks = num_partitions;
     let mut part_block_bounds = vec![];
     let mut part_block_counters = vec![];
     for part in 0 .. num_partitions {
@@ -329,7 +333,7 @@ impl VarrayDb {
       part_block_counters.push(0);
 
       part_tmp_dbs[part].prefetch_range(block_start_j, block_end_j);
-    }
+    }*/
 
     // Merge the temporary partition databases and flush the results to the
     // output database.
@@ -338,7 +342,7 @@ impl VarrayDb {
       let (_, part, j) = idx_ptr_heap.pop().unwrap();
       assert_eq!(j, part_block_counters[part]);
 
-      let (pre_block_start_j, pre_block_end_j) = part_block_bounds[part];
+      /*let (pre_block_start_j, pre_block_end_j) = part_block_bounds[part];
       if j >= pre_block_end_j {
         let (start_i, end_i) = part_bounds[part];
         let part_len = end_i - start_i;
@@ -353,7 +357,7 @@ impl VarrayDb {
 
       let (block_start_j, block_end_j) = part_block_bounds[part];
       assert!(j >= block_start_j);
-      assert!(j < block_end_j);
+      assert!(j < block_end_j);*/
 
       let value = part_tmp_dbs[part].get(j);
       buf.clear();
