@@ -15,11 +15,13 @@ use std::fs::{File, OpenOptions, remove_file};
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
 use std::mem::{size_of};
 use std::path::{Path, PathBuf};
+use std::ptr::{read_volatile};
 
 const BIG_MAGIC:    u64   = 0x5641_5252_4159_4442;
 const VERSION:      u64   = 0x01;
 const CHUNK_HEADER: usize = 16;
 const CHUNK_SIZE:   usize = 64 * 1024 * 1024;
+const PAGE_SIZE:    usize = 4 * 1024;
 
 struct BufChunk {
   data:     Mmap,
@@ -185,8 +187,21 @@ impl VarrayDb {
     self.prefetch_range(0, length);
   }
 
-  pub fn prefetch_range(&mut self, start_idx: usize, end_idx: usize) -> usize {
-    let mut sz = 0;
+  pub fn prefetch_range(&mut self, start_idx: usize, end_idx: usize) {
+    assert!(start_idx <= end_idx);
+    let start_entry = &self.index_entries[start_idx];
+    let last_entry = &self.index_entries[end_idx-1];
+    //unsafe { &self.buf_chunks[entry.chunk_idx].data.as_slice()[(CHUNK_HEADER + entry.chunk_offset) .. (CHUNK_HEADER + entry.chunk_offset + entry.value_size)] }
+    let start_chunk_idx = start_entry.chunk_idx;
+    let last_chunk_idx = last_entry.chunk_idx;
+    assert!(start_chunk_idx <= last_chunk_idx);
+    for chunk_idx in start_chunk_idx .. last_chunk_idx + 1 {
+      for p in 0 .. CHUNK_SIZE / PAGE_SIZE {
+        let offset = (p * PAGE_SIZE) as isize;
+        let _  = unsafe { read_volatile(self.buf_chunks[chunk_idx].data.as_slice().as_ptr().offset(offset)) };
+      }
+    }
+    /*let mut sz = 0;
     let mut buf = vec![];
     for idx in start_idx .. end_idx {
       let value = self.get(idx);
@@ -195,7 +210,7 @@ impl VarrayDb {
       sz += buf.len();
     }
     assert!(sz >= 0);
-    sz
+    sz*/
   }
 
   pub fn external_shuffle(&mut self, out_prefix: &Path, num_partitions: usize) {
