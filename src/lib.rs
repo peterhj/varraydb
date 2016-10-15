@@ -29,7 +29,7 @@ struct BufChunk {
   used_sz:  usize,
 }
 
-struct IndexEntry {
+pub struct IndexEntry {
   chunk_idx:    usize,
   chunk_offset: usize,
   value_size:   usize,
@@ -402,6 +402,15 @@ impl VarrayDb {
       remove_file(&part_paths[part]).unwrap();
       // FIXME(20160427): remove index files too.
     }
+  }
+
+  pub fn get_chunk_mem(&self, chunk_idx: usize) -> &[u8] {
+    unsafe { &self.buf_chunks[chunk_idx].data.as_slice()[CHUNK_HEADER ..] }
+  }
+
+  pub fn get_entry(&self, idx: usize) -> &IndexEntry {
+    let entry = &self.index_entries[idx];
+    entry
   }
 
   pub fn get(&mut self, idx: usize) -> &[u8] {
