@@ -13,8 +13,7 @@ path = "tools/varraydb-shuffle.rs"
 
 [dependencies]
 rand = "*"
-
 byteorder = "*"
 memmap = "*"
-
-rng = { path = "../../librng" }
+rng = { path = "../librng" }
+sharedmem = { path = "../libsharedmem" }

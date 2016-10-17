@@ -1,8 +1,11 @@
 extern crate byteorder;
 extern crate memmap;
 extern crate rng;
+extern crate sharedmem;
 
 extern crate rand;
+
+pub mod shared;
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, BigEndian};
 use memmap::{Mmap, Protection};
