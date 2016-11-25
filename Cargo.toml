@@ -15,5 +15,5 @@ path = "tools/varraydb-shuffle.rs"
 rand = "*"
 byteorder = "*"
 memmap = "*"
-rng = { path = "../librng" }
-sharedmem = { path = "../libsharedmem" }
+rng = "^0.1"
+sharedmem = "^0.1"
